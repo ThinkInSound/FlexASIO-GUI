@@ -1,0 +1,10 @@
+# Build artifacts
+build_tmp/
+__pycache__/
+*.pyc
+
+# Upstream FlexASIO source clone (not part of this project)
+FlexASIO/
+
+# Machine-specific
+register_gui.reg
