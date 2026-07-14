@@ -1,8 +1,8 @@
 # FlexASIO GUI
 
-<img width="462" height="552" alt="flexasiogui" src="https://github.com/user-attachments/assets/8e40d746-b80f-4889-bc72-277e735ec7cc" />
-
 A minimal settings panel for [FlexASIO](https://github.com/dechamps/FlexASIO), the universal ASIO driver for Windows. Built with Python and CustomTkinter.
+
+<img width="462" height="552" alt="flexasiogui" src="https://github.com/user-attachments/assets/8e40d746-b80f-4889-bc72-277e735ec7cc" />
 
 ## Features
 
