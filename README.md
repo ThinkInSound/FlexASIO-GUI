@@ -21,9 +21,10 @@ Settings are written to `FlexASIO.toml` in your user profile folder, which FlexA
 
 ## Download
 
-**Recommended:** grab `FlexASIOGUI-Setup.exe` from the [Releases page](https://github.com/ThinkInSound/FlexASIO-GUI/releases). It installs per-user (no admin prompt), adds a Start Menu shortcut, and creates a default config automatically — no first-launch step needed before your DAW.
+From the [Releases page](https://github.com/ThinkInSound/FlexASIO-GUI/releases):
 
-Alternatively, a portable build is in the [`dist`](dist/) folder — run `FlexASIOGUI.exe` (the `_internal` folder must stay next to the exe). For portable use, run `FlexASIOGUI.exe --init` once, or launch the GUI and click Apply, before first using FlexASIO in a DAW.
+- **`FlexASIOGUI-Setup.exe`** (recommended) — installs per-user (no admin prompt), adds a Start Menu shortcut, and creates a default config automatically, so no first-launch step is needed before your DAW
+- **`FlexASIOGUI-portable.zip`** — unzip anywhere and run `FlexASIOGUI.exe` (keep the `_internal` folder next to the exe). For portable use, run `FlexASIOGUI.exe --init` once, or launch the GUI and click Apply, before first using FlexASIO in a DAW
 
 ## Usage
 
