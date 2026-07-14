@@ -39,7 +39,7 @@ FlexASIO reads `%USERPROFILE%\FlexASIO.toml` when the DAW loads the driver. To m
 FlexASIOGUI.exe --init
 ```
 
-This silently writes a default config (WASAPI, exclusive mode, 256-sample buffer, default devices) and exits — it never touches an existing config. To automate it, add a RunOnce registry entry after installing (fires at next login, then removes itself):
+This silently writes a default config (WASAPI, shared mode, 256-sample buffer, default devices) and exits — it never touches an existing config. To automate it, add a RunOnce registry entry after installing (fires at next login, then removes itself):
 
 ```
 reg add HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce /v FlexASIOInit /t REG_SZ /d "\"C:\path\to\dist\FlexASIOGUI.exe\" --init"

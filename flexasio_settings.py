@@ -92,7 +92,7 @@ def read_config():
         "bufferSizeSamples": 256,
         "input_device":      "[ Default input ]",
         "output_device":     "[ Default output ]",
-        "exclusive":         True,
+        "exclusive":         False,
     }
     if not CONFIG_PATH.exists():
         return defaults
