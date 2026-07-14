@@ -25,10 +25,27 @@ A prebuilt Windows binary is available in the [`dist`](dist/) folder — run `Fl
 
 ## Usage
 
-1. **Launch the GUI once before opening your DAW** — the config file must exist before FlexASIO loads
-2. Pick your backend, devices, buffer size, and exclusive mode
-3. Click **Apply**
-4. In your DAW, select **FlexASIO** as your ASIO driver (if audio is already running, toggle the audio device off/on to pick up changes)
+1. Pick your backend, devices, buffer size, and exclusive mode
+2. Click **Apply**
+3. In your DAW, select **FlexASIO** as your ASIO driver (if audio is already running, toggle the audio device off/on to pick up changes)
+
+The FlexASIO driver itself is loaded directly by the DAW — this GUI only edits the config file and does not need to be running while you play.
+
+### First-run setup (no GUI required)
+
+FlexASIO reads `%USERPROFILE%\FlexASIO.toml` when the DAW loads the driver. To make sure that file exists before the first DAW session, run once:
+
+```
+FlexASIOGUI.exe --init
+```
+
+This silently writes a default config (WASAPI, exclusive mode, 256-sample buffer, default devices) and exits — it never touches an existing config. To automate it, add a RunOnce registry entry after installing (fires at next login, then removes itself):
+
+```
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce /v FlexASIOInit /t REG_SZ /d "\"C:\path\to\dist\FlexASIOGUI.exe\" --init"
+```
+
+Or call it from an installer's post-install step.
 
 ## Running from source
 

@@ -299,7 +299,28 @@ class FlexASIOPanel(ctk.CTk):
         )
         self.status_var.set("Saved — toggle audio off/on in Ableton to apply.")
 
+def _init_config():
+    """Write a default FlexASIO.toml if none exists, then exit.
+
+    Meant to be run headless (``FlexASIOGUI.exe --init``) by an installer
+    or a RunOnce registry entry, so FlexASIO has a config file before the
+    DAW first loads the driver.
+    """
+    if not CONFIG_PATH.exists():
+        cfg = read_config()  # returns defaults when the file is missing
+        write_config(
+            backend       = cfg["backend"],
+            buffer_size   = cfg["bufferSizeSamples"],
+            input_device  = cfg["input_device"],
+            output_device = cfg["output_device"],
+            exclusive     = cfg["exclusive"],
+        )
+
+
 if __name__ == "__main__":
+    if "--init" in sys.argv:
+        _init_config()
+        sys.exit(0)
     _mutex = _ensure_single_instance()
     app = FlexASIOPanel()
     app.mainloop()
