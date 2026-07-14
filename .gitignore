@@ -6,5 +6,8 @@ __pycache__/
 # Upstream FlexASIO source clone (not part of this project)
 FlexASIO/
 
+# Compiled installer (published via GitHub Releases instead)
+installer/
+
 # Machine-specific
 register_gui.reg
