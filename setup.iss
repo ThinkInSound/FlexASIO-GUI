@@ -2,7 +2,7 @@
 ; Build with: ISCC setup.iss  (output: installer\FlexASIOGUI-Setup.exe)
 
 #define AppName "FlexASIO GUI"
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.0"
 #define AppExe "FlexASIOGUI.exe"
 
 [Setup]
@@ -24,7 +24,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
 
 [Files]
-Source: "dist\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "dist\*"; DestDir: "{app}"; Excludes: "FlexASIOGUI-portable.zip"; Flags: recursesubdirs ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
