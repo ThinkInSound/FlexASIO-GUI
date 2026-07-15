@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import customtkinter as ctk
 from pathlib import Path
 
@@ -162,8 +163,10 @@ def write_config(backend, buffer_size, input_device, output_device, exclusive):
         lines += device_line(device_name)
         if is_wasapi:
             lines += f'wasapiExclusiveMode = {"true" if exclusive else "false"}\n'
-            if exclusive:
-                lines += "suggestedLatencySeconds = 0.0\n"
+            # No suggestedLatencySeconds here: 0.0 pins PortAudio to its
+            # minimum buffering regardless of bufferSizeSamples, which
+            # glitches in full duplex. The default (3x the ASIO buffer) is
+            # reliable and leaves the buffer setting in control of latency.
         return lines
 
     body = (
@@ -199,6 +202,72 @@ def test_driver():
         return "hang"
     except Exception:
         return "ok"
+
+
+# The driver watches FlexASIO.toml: a DAW that is currently streaming picks up
+# a config change within about a second by restarting its audio engine
+# (kAsioResetRequest). Racing FlexASIOTest against that always loses — the DAW
+# grabs the device first — so when a live pickup is detected, the verdict comes
+# from the driver log instead of FlexASIOTest.
+_RESET_MARKER      = "Issuing reset request due to config change"
+_CREATEBUFFERS_RE  = re.compile(r'EXITING CONTEXT: createBuffers\(\) (.*)')
+
+def _read_log_from(offset):
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(offset)
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _apply_and_verify(cfg_args, progress):
+    """Write the config, then verify the driver accepts it.
+
+    Returns "ok"/"fail"/"hang" when verified via FlexASIOTest, or
+    "daw-ok"/"daw-fail" when a DAW was streaming and verified it live.
+    ``progress(msg)`` reports status text along the way (called off the Tk
+    thread; the caller polls).
+    """
+    created_log = not LOG_PATH.exists()
+    if created_log:
+        try:
+            LOG_PATH.touch()  # existence of the file enables driver logging
+        except OSError:
+            created_log = False
+    try:
+        offset = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
+    except OSError:
+        offset = 0
+
+    try:
+        write_config(**cfg_args)
+
+        deadline = time.monotonic() + 2.0
+        reset_seen = False
+        while time.monotonic() < deadline:
+            if _RESET_MARKER in _read_log_from(offset):
+                reset_seen = True
+                break
+            time.sleep(0.2)
+
+        if not reset_seen:
+            return test_driver()  # no live driver instance; safe to self-test
+
+        progress("Ableton picked up the change — restarting its audio…")
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            statuses = _CREATEBUFFERS_RE.findall(_read_log_from(offset))
+            if statuses:
+                return "daw-ok" if statuses[-1].startswith("[OK]") else "daw-fail"
+            time.sleep(0.3)
+        return "daw-fail"  # DAW never came back up with these settings
+    finally:
+        if created_log:
+            try:
+                LOG_PATH.unlink()  # stop driver logging again
+            except OSError:
+                pass  # driver may still hold it; size cap cleanup handles it
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
@@ -376,6 +445,16 @@ class FlexASIOPanel(ctk.CTk):
         if not is_wasapi:
             self.exclusive_var.set(False)
 
+    def _sync_ui_to_config(self, cfg):
+        """Point every control back at what the config file actually says."""
+        self.backend_var.set(cfg["backend"])
+        self._buf_str_var.set(str(cfg["bufferSizeSamples"]))
+        self._refresh_devices(
+            cfg["backend"], cfg.get("input_device"), cfg.get("output_device")
+        )
+        self.exclusive_var.set(cfg["exclusive"])
+        self._sync_exclusive_state()
+
     def _refresh_devices(self, backend, restore_in=None, restore_out=None):
         inputs, outputs = get_devices(backend)
         self.input_menu.configure(values=inputs)
@@ -393,9 +472,9 @@ class FlexASIOPanel(ctk.CTk):
 
         self.apply_btn.configure(state="disabled")
         self.status_label.configure(text_color=MUTED)
-        self.status_var.set("Testing settings…")
+        self.status_var.set("Applying settings…")
 
-        write_config(
+        cfg_args = dict(
             backend      = self.backend_var.get(),
             buffer_size  = int(self._buf_str_var.get()),
             input_device = self.input_var.get(),
@@ -403,30 +482,38 @@ class FlexASIOPanel(ctk.CTk):
             exclusive    = self.exclusive_var.get(),
         )
 
-        # test_driver() blocks on FlexASIOTest (up to its timeout), so run
-        # it off the Tk thread. Tkinter calls are not thread-safe, so the
-        # worker only stores the result; the Tk thread polls for it.
+        # _apply_and_verify blocks (FlexASIOTest timeout / DAW reload watch),
+        # so run it off the Tk thread. Tkinter calls are not thread-safe, so
+        # the worker only stores results; the Tk thread polls for them.
         result = {}
 
         def worker():
-            result["verdict"] = test_driver()
+            result["verdict"] = _apply_and_verify(
+                cfg_args, progress=lambda msg: result.__setitem__("status", msg)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
         def poll():
             if "verdict" in result:
                 self._finish_apply(result["verdict"], previous)
-            else:
-                self.after(100, poll)
+                return
+            if "status" in result:
+                self.status_var.set(result.pop("status"))
+            self.after(100, poll)
 
         self.after(100, poll)
 
     def _finish_apply(self, verdict, previous):
         self.apply_btn.configure(state="normal")
 
-        if verdict == "ok":
+        if verdict in ("ok", "daw-ok"):
             self.status_label.configure(text_color=SUCCESS)
-            self.status_var.set("Saved — toggle audio off/on in Ableton to apply.")
+            self.status_var.set(
+                "Saved — Ableton restarted its audio with the new settings."
+                if verdict == "daw-ok"
+                else "Saved — toggle audio off/on in Ableton to apply."
+            )
             return
 
         # The driver can't work with these settings; roll back so the DAW
@@ -436,23 +523,39 @@ class FlexASIOPanel(ctk.CTk):
         else:
             CONFIG_PATH.write_text(previous, encoding="utf-8")
 
-        if verdict == "hang":
-            self.status_var.set(
+        # Snap every control back to the rolled-back config so the UI
+        # never advertises a state the driver just refused (an exclusive
+        # failure can surface as "hang", not just "fail", so this must
+        # not depend on the verdict).
+        tried_exclusive = self.exclusive_var.get()
+        self._sync_ui_to_config(read_config())
+
+        if tried_exclusive and not self.exclusive_var.get():
+            msg = (
+                "Rejected: driver can't start in exclusive mode — another "
+                "app may be holding the device, or exclusive access is off "
+                "in Windows sound device properties (mmsys.cpl). "
+                "Exclusive mode has been switched back off."
+            )
+        elif verdict == "hang":
+            msg = (
                 "Rejected: driver locks up when audio starts with these "
                 "settings — a DAW using them would freeze. This backend "
                 "may not work on this system. Previous settings kept."
             )
-        elif self.exclusive_var.get():
-            self.status_var.set(
-                "Rejected: driver can't start in exclusive mode. Enable "
-                "\"Allow applications to take exclusive control\" in Windows "
-                "sound device properties (mmsys.cpl), then retry."
-            )
         else:
-            self.status_var.set(
+            msg = (
                 "Rejected: driver can't start with these settings. "
                 "Previous settings kept."
             )
+        if verdict == "daw-fail":
+            # The failed instance is gone, so the restored config won't be
+            # picked up automatically — the DAW needs an audio restart.
+            msg += (
+                " If Ableton shows a driver error, toggle audio off/on in "
+                "its preferences to recover."
+            )
+        self.status_var.set(msg)
         self.status_label.configure(text_color=ERROR)
 
 def _init_config():
