@@ -5,6 +5,7 @@ import ctypes
 import re
 import subprocess
 import sys
+import threading
 import customtkinter as ctk
 from pathlib import Path
 
@@ -23,10 +24,19 @@ def _ensure_single_instance():
         sys.exit(0)
     return mutex  # keep reference alive so mutex isn't released
 
-CONFIG_PATH    = Path.home() / "FlexASIO.toml"
-PORT_AUDIO_EXE = Path(r"C:\Program Files\FlexASIO\x64\PortAudioDevices.exe")
+CONFIG_PATH       = Path.home() / "FlexASIO.toml"
+LOG_PATH          = Path.home() / "FlexASIO.log"
+PORT_AUDIO_EXE    = Path(r"C:\Program Files\FlexASIO\x64\PortAudioDevices.exe")
+FLEXASIO_TEST_EXE = Path(r"C:\Program Files\FlexASIO\x64\FlexASIOTest.exe")
 
-BACKENDS     = ["Windows WASAPI", "Windows DirectSound", "Windows WDM-KS", "MME"]
+# FlexASIO logs whenever ~/FlexASIO.log exists and never rotates it; a debug
+# log someone forgot to turn off grows until the driver's 1 GiB hard cap.
+MAX_LOG_BYTES = 16 * 1024 * 1024
+
+# DirectSound and WDM-KS are deliberately absent: on this machine both hang
+# or crash the driver at stream start (flakily — an apply-time test pass
+# doesn't make them safe in the DAW), verified 2026-07-14.
+BACKENDS     = ["Windows WASAPI", "MME"]
 BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 
 # ── device enumeration via PortAudioDevices.exe ───────────────────────────────
@@ -36,6 +46,7 @@ def _parse_port_audio_devices():
     result = subprocess.run(
         [str(PORT_AUDIO_EXE)],
         capture_output=True, text=True, timeout=10,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
     output = result.stdout + result.stderr  # it logs to stderr
     devices, current = [], {}
@@ -105,6 +116,8 @@ def read_config():
 
     cfg = dict(defaults)
     cfg["backend"]           = g(r'^backend\s*=\s*"([^"]*)"', text) or defaults["backend"]
+    if cfg["backend"] not in BACKENDS:  # e.g. config written before a backend was dropped
+        cfg["backend"] = defaults["backend"]
     cfg["bufferSizeSamples"] = g(r'^bufferSizeSamples\s*=\s*(\d+)', text, int) or defaults["bufferSizeSamples"]
 
     in_sec  = re.search(r'\[input\](.*?)(?=\n\[|\Z)',  text, re.DOTALL)
@@ -156,6 +169,30 @@ def write_config(backend, buffer_size, input_device, output_device, exclusive):
     )
     CONFIG_PATH.write_text(body, encoding="utf-8")
 
+
+def test_driver():
+    """Test whether FlexASIO works with the current config file.
+
+    Returns "ok", "fail" (driver can't initialize), or "hang" (driver
+    initializes but never returns from stream start — a DAW loading this
+    config would lock up the same way; DirectSound does this on some
+    setups). When the check itself can't run, returns "ok" rather than
+    lock the user out.
+    """
+    if not FLEXASIO_TEST_EXE.exists():
+        return "ok"
+    try:
+        result = subprocess.run(
+            [str(FLEXASIO_TEST_EXE)],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return "ok" if result.returncode == 0 else "fail"
+    except subprocess.TimeoutExpired:
+        return "hang"
+    except Exception:
+        return "ok"
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 BG        = "#1e1e1e"
@@ -165,6 +202,50 @@ ACCENT    = "#0078d4"
 TEXT      = "#e8e8e8"
 MUTED     = "#888888"
 SUCCESS   = "#4ec94e"
+ERROR     = "#e05d5d"
+
+class _ToolTip:
+    """Hover tooltip for a widget (customtkinter has no built-in one)."""
+
+    def __init__(self, widget, text, delay_ms=400):
+        self.widget, self.text, self.delay_ms = widget, text, delay_ms
+        self._after_id, self._tip = None, None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<Button>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _show(self):
+        if self._tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 10
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self._tip = ctk.CTkToplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        self._tip.attributes("-topmost", True)
+        ctk.CTkLabel(
+            self._tip, text=self.text,
+            font=("Segoe UI", 10), text_color=TEXT,
+            fg_color=SURFACE, corner_radius=6,
+            wraplength=280, justify="left",
+            padx=10, pady=6,
+        ).pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+    def _cancel(self):
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
 
 class FlexASIOPanel(ctk.CTk):
     def __init__(self):
@@ -172,7 +253,7 @@ class FlexASIOPanel(ctk.CTk):
         ctk.set_appearance_mode("dark")
 
         self.title("FlexASIO")
-        self.geometry("360x400")
+        self.geometry("360x472")
         self.resizable(False, False)
         self.configure(fg_color=BG)
 
@@ -224,21 +305,32 @@ class FlexASIOPanel(ctk.CTk):
             hover_color=ACCENT,
         )
         self.excl_cb.pack(side="left")
+        _ToolTip(
+            self.excl_cb,
+            'Requires "Allow applications to take exclusive control of this '
+            'device" to be enabled in Windows sound device properties '
+            "(mmsys.cpl → device → Properties → Advanced). "
+            "Without it the driver cannot start and these settings will be "
+            "rejected.",
+        )
 
         # Apply button
-        ctk.CTkButton(
+        self.apply_btn = ctk.CTkButton(
             self, text="Apply", command=self._apply,
             width=320, height=36,
             font=("Segoe UI", 13, "bold"),
             fg_color=ACCENT, hover_color="#005fa3",
-        ).pack(padx=20, pady=(18, 0))
+        )
+        self.apply_btn.pack(padx=20, pady=(18, 0))
 
         # Status line
         self.status_var = ctk.StringVar(value="")
-        ctk.CTkLabel(
+        self.status_label = ctk.CTkLabel(
             self, textvariable=self.status_var,
             font=("Segoe UI", 10), text_color=SUCCESS,
-        ).pack(pady=(6, 0))
+            wraplength=320,
+        )
+        self.status_label.pack(pady=(6, 0))
 
         # Populate dropdowns
         self._refresh_devices(
@@ -290,6 +382,12 @@ class FlexASIOPanel(ctk.CTk):
         )
 
     def _apply(self):
+        previous = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
+
+        self.apply_btn.configure(state="disabled")
+        self.status_label.configure(text_color=MUTED)
+        self.status_var.set("Testing settings…")
+
         write_config(
             backend      = self.backend_var.get(),
             buffer_size  = int(self._buf_str_var.get()),
@@ -297,7 +395,58 @@ class FlexASIOPanel(ctk.CTk):
             output_device= self.output_var.get(),
             exclusive    = self.exclusive_var.get(),
         )
-        self.status_var.set("Saved — toggle audio off/on in Ableton to apply.")
+
+        # test_driver() blocks on FlexASIOTest (up to its timeout), so run
+        # it off the Tk thread. Tkinter calls are not thread-safe, so the
+        # worker only stores the result; the Tk thread polls for it.
+        result = {}
+
+        def worker():
+            result["verdict"] = test_driver()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            if "verdict" in result:
+                self._finish_apply(result["verdict"], previous)
+            else:
+                self.after(100, poll)
+
+        self.after(100, poll)
+
+    def _finish_apply(self, verdict, previous):
+        self.apply_btn.configure(state="normal")
+
+        if verdict == "ok":
+            self.status_label.configure(text_color=SUCCESS)
+            self.status_var.set("Saved — toggle audio off/on in Ableton to apply.")
+            return
+
+        # The driver can't work with these settings; roll back so the DAW
+        # never sees a known-broken config.
+        if previous is None:
+            CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            CONFIG_PATH.write_text(previous, encoding="utf-8")
+
+        if verdict == "hang":
+            self.status_var.set(
+                "Rejected: driver locks up when audio starts with these "
+                "settings — a DAW using them would freeze. This backend "
+                "may not work on this system. Previous settings kept."
+            )
+        elif self.exclusive_var.get():
+            self.status_var.set(
+                "Rejected: driver can't start in exclusive mode. Enable "
+                "\"Allow applications to take exclusive control\" in Windows "
+                "sound device properties (mmsys.cpl), then retry."
+            )
+        else:
+            self.status_var.set(
+                "Rejected: driver can't start with these settings. "
+                "Previous settings kept."
+            )
+        self.status_label.configure(text_color=ERROR)
 
 def _init_config():
     """Write a default FlexASIO.toml if none exists, then exit.
@@ -317,10 +466,55 @@ def _init_config():
         )
 
 
+def _scrub_stale_pins():
+    """Drop pinned devices that are no longer present.
+
+    FlexASIO refuses to initialize at all when a pinned device is missing,
+    so fall back to the system default rather than leave a dead pin.
+    """
+    if not CONFIG_PATH.exists():
+        return
+    cfg = read_config()
+    inputs, outputs = get_devices(cfg["backend"])
+    if _device_cache is None:
+        return  # enumeration failed; can't tell what's stale
+    scrubbed = dict(cfg)
+    if cfg["input_device"] not in inputs:
+        scrubbed["input_device"] = "[ Default input ]"
+    if cfg["output_device"] not in outputs:
+        scrubbed["output_device"] = "[ Default output ]"
+    if scrubbed != cfg:
+        write_config(
+            backend       = scrubbed["backend"],
+            buffer_size   = scrubbed["bufferSizeSamples"],
+            input_device  = scrubbed["input_device"],
+            output_device = scrubbed["output_device"],
+            exclusive     = scrubbed["exclusive"],
+        )
+
+
+def _reap_oversized_log():
+    """Delete a forgotten debug log before it grows unbounded.
+
+    FlexASIO logs whenever LOG_PATH exists; anyone who enabled logging for a
+    support session and forgot about it otherwise pays the overhead forever
+    and ends up with a gigabyte-scale file.
+    """
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > MAX_LOG_BYTES:
+            LOG_PATH.unlink()
+    except OSError:
+        pass  # in use or access denied; try again next launch
+
+
 if __name__ == "__main__":
     if "--init" in sys.argv:
         _init_config()
+        _scrub_stale_pins()
+        _reap_oversized_log()
         sys.exit(0)
     _mutex = _ensure_single_instance()
+    _scrub_stale_pins()
+    _reap_oversized_log()
     app = FlexASIOPanel()
     app.mainloop()
