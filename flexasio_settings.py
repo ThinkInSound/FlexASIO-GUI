@@ -101,7 +101,10 @@ def read_config():
     defaults = {
         "backend":           "Windows WASAPI",
         "bufferSizeSamples": 256,
-        "input_device":      "[ Default input ]",
+        # Input defaults to disabled: opening the default capture device
+        # drags virtual mics (DroidCam/NDI/Steam) into the driver, and
+        # their stream teardown can hang the DAW.
+        "input_device":      "[ Disabled ]",
         "output_device":     "[ Default output ]",
         "exclusive":         False,
     }
@@ -119,6 +122,10 @@ def read_config():
     if cfg["backend"] not in BACKENDS:  # e.g. config written before a backend was dropped
         cfg["backend"] = defaults["backend"]
     cfg["bufferSizeSamples"] = g(r'^bufferSizeSamples\s*=\s*(\d+)', text, int) or defaults["bufferSizeSamples"]
+
+    # In an existing file, no device line means FlexASIO uses the default
+    # device — the disabled-input default above only applies to missing files.
+    cfg["input_device"] = "[ Default input ]"
 
     in_sec  = re.search(r'\[input\](.*?)(?=\n\[|\Z)',  text, re.DOTALL)
     out_sec = re.search(r'\[output\](.*?)(?=\n\[|\Z)', text, re.DOTALL)
@@ -480,7 +487,7 @@ def _scrub_stale_pins():
         return  # enumeration failed; can't tell what's stale
     scrubbed = dict(cfg)
     if cfg["input_device"] not in inputs:
-        scrubbed["input_device"] = "[ Default input ]"
+        scrubbed["input_device"] = "[ Disabled ]"
     if cfg["output_device"] not in outputs:
         scrubbed["output_device"] = "[ Default output ]"
     if scrubbed != cfg:
