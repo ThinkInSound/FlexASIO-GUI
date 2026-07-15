@@ -98,7 +98,10 @@ def get_devices(backend):
 
 # ── TOML read / write ─────────────────────────────────────────────────────────
 
-def read_config():
+def read_config(text=None):
+    """Parse config settings. Reads CONFIG_PATH when ``text`` is None
+    (returning defaults if the file is missing); pass ``text`` to parse a
+    snapshot instead."""
     defaults = {
         "backend":           "Windows WASAPI",
         "bufferSizeSamples": 256,
@@ -109,10 +112,10 @@ def read_config():
         "output_device":     "[ Default output ]",
         "exclusive":         False,
     }
-    if not CONFIG_PATH.exists():
-        return defaults
-
-    text = CONFIG_PATH.read_text(encoding="utf-8")
+    if text is None:
+        if not CONFIG_PATH.exists():
+            return defaults
+        text = CONFIG_PATH.read_text(encoding="utf-8")
 
     def g(pattern, text, cast=str, default=None):
         m = re.search(pattern, text, re.MULTILINE)
@@ -373,9 +376,11 @@ class FlexASIOPanel(ctk.CTk):
         self.excl_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.excl_frame.pack(padx=20, pady=(14, 0), fill="x")
         self.exclusive_var = ctk.BooleanVar(value=cfg["exclusive"])
+        self._pre_exclusive_input = None
         self.excl_cb = ctk.CTkCheckBox(
             self.excl_frame, text="WASAPI Exclusive Mode",
             variable=self.exclusive_var,
+            command=self._on_exclusive_toggle,
             font=("Segoe UI", 12), text_color=TEXT,
             fg_color=ACCENT, border_color=BORDER,
             hover_color=ACCENT,
@@ -437,6 +442,32 @@ class FlexASIOPanel(ctk.CTk):
     def _on_backend_change(self, _value):
         self._refresh_devices(self.backend_var.get())
         self._sync_exclusive_state()
+
+    def _on_exclusive_toggle(self):
+        """Suggest half duplex when exclusive is switched on.
+
+        Exclusive full duplex glitches when the input and output devices
+        run on different clocks (44.1 kHz mic vs 48 kHz output here), so
+        checking the box parks the input on [ Disabled ]. It is only a
+        suggestion — the input menu stays enabled and any device can be
+        re-selected before applying.
+        """
+        if self.exclusive_var.get():
+            if self.input_var.get() != "[ Disabled ]":
+                self._pre_exclusive_input = self.input_var.get()
+                self.input_var.set("[ Disabled ]")
+                self.status_label.configure(text_color=MUTED)
+                self.status_var.set(
+                    "Input set to [ Disabled ]: exclusive mode glitches "
+                    "when mic and output clocks differ. Re-select an input "
+                    "above if you need one."
+                )
+        else:
+            if self._pre_exclusive_input and self.input_var.get() == "[ Disabled ]":
+                self.input_var.set(self._pre_exclusive_input)
+                self.status_label.configure(text_color=MUTED)
+                self.status_var.set("Input selection restored.")
+            self._pre_exclusive_input = None
 
     def _sync_exclusive_state(self):
         is_wasapi = self.backend_var.get() == "Windows WASAPI"
@@ -517,11 +548,22 @@ class FlexASIOPanel(ctk.CTk):
             return
 
         # The driver can't work with these settings; roll back so the DAW
-        # never sees a known-broken config.
+        # never sees a known-broken config. Re-write the previous settings
+        # through write_config instead of restoring the raw bytes: an old
+        # file can carry options this GUI no longer writes (e.g. the
+        # glitch-prone suggestedLatencySeconds = 0.0), and a byte-exact
+        # restore would resurrect them.
         if previous is None:
             CONFIG_PATH.unlink(missing_ok=True)
         else:
-            CONFIG_PATH.write_text(previous, encoding="utf-8")
+            prev = read_config(previous)
+            write_config(
+                backend       = prev["backend"],
+                buffer_size   = prev["bufferSizeSamples"],
+                input_device  = prev["input_device"],
+                output_device = prev["output_device"],
+                exclusive     = prev["exclusive"],
+            )
 
         # Snap every control back to the rolled-back config so the UI
         # never advertises a state the driver just refused (an exclusive
@@ -542,6 +584,15 @@ class FlexASIOPanel(ctk.CTk):
                 "Rejected: driver locks up when audio starts with these "
                 "settings — a DAW using them would freeze. This backend "
                 "may not work on this system. Previous settings kept."
+            )
+        elif self.exclusive_var.get():
+            # Exclusive was already on and stays on — the rejected change
+            # was something else, most likely the buffer size, which the
+            # hardware constrains tightly in exclusive mode.
+            msg = (
+                "Rejected: driver can't start with these settings. In "
+                "exclusive mode the hardware only accepts certain buffer "
+                "sizes — try a different size. Previous settings kept."
             )
         else:
             msg = (
